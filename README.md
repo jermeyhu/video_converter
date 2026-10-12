@@ -5,21 +5,19 @@
 ## 快速启动
 
 ```powershell
-Copy-Item .env.example .env
 New-Item -ItemType Directory -Force input, output
-docker compose pull
-docker compose up -d
+docker compose -f docker-compose.yaml up -d
 ```
 
-Compose 使用已发布的 `ghcr.io/jermeyhu/video_converter:latest` 镜像。若需指定其他版本，可在 `.env` 中设置 `IMAGE`，例如 `IMAGE=ghcr.io/jermeyhu/video_converter:v1.0.0`。若需使用本地构建的镜像，先运行 `docker build -t ghcr.io/jermeyhu/video_converter:latest .`，再执行 `docker compose up -d`。
+使用 `ghcr.io/jermeyhu/video_converter:latest` 镜像，挂载当前目录下的 `input`、`output` 文件夹。修改配置时编辑 Compose 文件中的 `environment` 值。
 
 将视频复制到 `input` 目录。服务会等到文件大小和修改时间在 `FILE_STABILITY_SECONDS` 秒内保持不变后，再把它加入转换队列。查看运行日志：
 
 ```powershell
-docker compose logs -f
+docker compose -f docker-compose.yaml logs -f
 ```
 
-默认输出为 1920x1080 的 MP4（H.264/AAC）。转换时会保持原视频宽高比，并通过补边适配目标分辨率。若目标文件已存在，服务会跳过转换，绝不会覆盖已有文件。
+默认输出为 MP4（H.264/AAC），保持源视频原始分辨率。只有同时设置 `OUTPUT_WIDTH` 和 `OUTPUT_HEIGHT` 时才会调整分辨率；转换时保持原视频宽高比，并通过补边适配目标尺寸。若目标文件已存在，服务会跳过转换，绝不会覆盖已有文件。
 
 ## 环境变量
 
@@ -30,35 +28,50 @@ docker compose logs -f
 | `INPUT_DIR` | `/data/input` | 容器内输入目录。 |
 | `OUTPUT_DIR` | `/data/output` | 容器内输出目录，必须与 `INPUT_DIR` 不同。 |
 | `OUTPUT_FORMAT` | `mp4` | FFmpeg 输出容器格式及文件扩展名，例如 `mkv`、`webm`、`mov`。请为容器选择兼容的编码器。 |
-| `VIDEO_CODEC` | `auto` | `auto` 自动检测可用的 H.264 硬件编码器，不可用时回退到 `libx264`；也可以指定 FFmpeg 视频编码器，例如 `libx265` 或 `libvpx-vp9`。 |
+| `VIDEO_CODEC` | `h264` | 设置编码格式为 `h264` 或 `h265`，自动检测该格式的可用硬件编码器；硬件不可用或失败时分别回退到 `libx264` / `libx265`。也可指定具体 FFmpeg 编码器名称，此时直接使用该编码器。 |
 | `AUDIO_CODEC` | `aac` | FFmpeg 音频编码器，例如 `aac`、`libopus` 或 `copy`。默认会重新编码音频。 |
-| `OUTPUT_WIDTH` | `1920` | 输出宽度，必须为正偶数。 |
-| `OUTPUT_HEIGHT` | `1080` | 输出高度，必须为正偶数。 |
+| `OUTPUT_WIDTH` | 未设置 | 可选输出宽度，必须为正偶数；须与 `OUTPUT_HEIGHT` 同时设置。 |
+| `OUTPUT_HEIGHT` | 未设置 | 可选输出高度，必须为正偶数；须与 `OUTPUT_WIDTH` 同时设置。 |
 | `MAX_CONCURRENT_CONVERSIONS` | `1` | 最大同时转换数。其余稳定文件会排队等待。 |
 | `POLL_INTERVAL_SECONDS` | `2` | 扫描目录的时间间隔。 |
 | `FILE_STABILITY_SECONDS` | `5` | 输入文件保持不变多久后才开始排队。 |
 | `FFMPEG_BIN` | `ffmpeg` | FFmpeg 可执行文件路径（在 Docker 外运行时可用）。 |
 
-在启动 Compose 前修改 `.env` 即可配置。服务只监控输入目录顶层，不递归处理子目录。支持的输入扩展名包括 MP4、MKV、MOV、AVI、WebM、MPEG/MPG、M4V、TS/MTS/M2TS、FLV、WMV 和 3GP。
+`OUTPUT_WIDTH` 和 `OUTPUT_HEIGHT` 默认不设置，需同时设置才会缩放。服务只监控输入目录顶层，不递归处理子目录。支持的输入扩展名包括 MP4、MKV、MOV、AVI、WebM、MPEG/MPG、M4V、TS/MTS/M2TS、FLV、WMV 和 3GP。
 
-例如，输出 WebM 时可配置：
+例如，要使用 WebM 输出或指定 720p，可在 `video-converter` 下添加：
 
-```dotenv
-OUTPUT_FORMAT=webm
-VIDEO_CODEC=libvpx-vp9
-AUDIO_CODEC=libopus
+```yaml
+    environment:
+      OUTPUT_FORMAT: webm
+      VIDEO_CODEC: libvpx-vp9
+      AUDIO_CODEC: libopus
+      OUTPUT_WIDTH: "1280"
+      OUTPUT_HEIGHT: "720"
+```
+
+选择 H.264 或 H.265 时，只需将 Compose 中的编码配置设为：
+
+```yaml
+      VIDEO_CODEC: h264
+```
+
+或：
+
+```yaml
+      VIDEO_CODEC: h265
 ```
 
 ## 硬件加速
 
-当 `VIDEO_CODEC=auto` 时，程序会检查容器中的 FFmpeg 是否支持 H.264 硬件编码器，并确认对应设备已映射进容器。尝试顺序为 NVIDIA NVENC、Intel QSV、VAAPI。若编码器不存在、设备不可用或硬件编码失败，程序会记录原因并自动回退到 CPU `libx264`。显式指定 `VIDEO_CODEC` 时，将直接使用指定编码器，不再自动选择硬件或回退。
+`VIDEO_CODEC=h264` 时，程序按 NVENC、QSV、VAAPI 的顺序检测 H.264 硬件编码器；`VIDEO_CODEC=h265` 时，则检测对应的 HEVC 编码器。硬件编码失败或不可用时分别回退到 CPU `libx264` 或 `libx265`。若设置为具体 FFmpeg 编码器名（如 `h264_nvenc`、`hevc_nvenc`、`libx264`、`libx265` 或 `libvpx-vp9`），则直接使用该编码器，不进行自动检测或回退。
 
-硬件设备需由主机传入容器：
+Compose 只定义一个 `video-converter` 服务。若需启用 NVIDIA 硬件加速，主机安装 NVIDIA Container Toolkit，然后在 `docker-compose.yaml` 中取消 `gpus: all` 的注释；旧版 Compose 可改用注释中的 `deploy.resources.reservations.devices` 配置，两种 GPU 请求方式只启用其一。启用 Intel QSV / VAAPI 时，则取消 `/dev/dri` 的 `devices` 配置注释，并保持 NVIDIA GPU 请求配置注释状态。修改后执行 `docker compose -f docker-compose.yaml up -d` 使配置生效。
 
-- **NVIDIA：** 安装 NVIDIA Container Toolkit，然后运行 `docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d`。使用主机 GPU 驱动，无需在主机安装 FFmpeg。
-- **Intel QSV / VAAPI：** 将 render 设备映射到容器，通常可运行 `docker compose -f docker-compose.yml -f docker-compose.vaapi.yml up -d`。主机需提供 `/dev/dri` 及兼容的设备驱动和 FFmpeg 编码器。
+- **NVIDIA：** 主机安装 NVIDIA Container Toolkit，然后启用 `gpus: all`。使用主机 GPU 驱动，无需在主机安装 FFmpeg。
+- **Intel QSV / VAAPI：** 将主机 `/dev/dri` 映射进容器；主机还需提供兼容的设备驱动和 FFmpeg 编码器。
 
-以上 Compose 配置会使用已发布的 GHCR 镜像。需要从本地 Dockerfile 构建时，先执行前述本地构建命令。
+每次只为当前机器启用对应的一种设备配置。选用 `h264` 或 `h265` 后，程序会检测并尝试相应硬件编码；没有可用硬件或硬件编码失败时，自动回退 CPU。
 
 若没有向容器映射 GPU，服务会继续使用 CPU 转换。每个输入文件都会独立尝试硬件编码；失败时会清理临时文件，再进行 CPU 编码。
 
@@ -66,10 +79,11 @@ AUDIO_CODEC=libopus
 
 转换工作线程数量由 `MAX_CONCURRENT_CONVERSIONS` 限制，超出的文件会进入内存队列等待，因此同时运行的 FFmpeg 进程数不会超过配置值。队列不持久化；服务重启后会重新扫描输入目录并重建任务。转换失败会记录日志；同一文件只有在内容或修改时间变化后才会再次尝试。转换期间的临时文件会被清理，输入文件始终保留。
 
-停止服务：
+修改配置后应用变更或停止服务：
 
 ```powershell
-docker compose down
+docker compose -f docker-compose.yaml up -d
+docker compose -f docker-compose.yaml down
 ```
 
 ## GitHub Actions 镜像发布

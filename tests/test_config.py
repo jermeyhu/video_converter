@@ -6,14 +6,15 @@ from video_converter.config import load_settings
 
 
 class LoadSettingsTests(unittest.TestCase):
-    def test_defaults_include_single_worker_and_automatic_codec(self) -> None:
+    def test_defaults_preserve_resolution_and_use_single_worker(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             settings = load_settings()
 
         self.assertEqual(settings.max_concurrent_conversions, 1)
-        self.assertEqual(settings.video_codec, "auto")
+        self.assertEqual(settings.video_codec, "h264")
         self.assertEqual(settings.output_format, "mp4")
-        self.assertEqual((settings.width, settings.height), (1920, 1080))
+        self.assertIsNone(settings.width)
+        self.assertIsNone(settings.height)
 
     def test_environment_configures_concurrency_and_resolution(self) -> None:
         with patch.dict(
@@ -32,6 +33,12 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual((settings.width, settings.height), (1280, 720))
         self.assertEqual(settings.output_format, "mkv")
 
+    def test_selects_h265_profile_from_environment(self) -> None:
+        with patch.dict(os.environ, {"VIDEO_CODEC": "h265"}, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.video_codec, "h265")
+
     def test_rejects_same_input_and_output_directory(self) -> None:
         with patch.dict(
             os.environ,
@@ -49,6 +56,11 @@ class LoadSettingsTests(unittest.TestCase):
     def test_rejects_odd_output_dimensions(self) -> None:
         with patch.dict(os.environ, {"OUTPUT_WIDTH": "1279"}, clear=True):
             with self.assertRaisesRegex(ValueError, "OUTPUT_WIDTH must be an even integer"):
+                load_settings()
+
+    def test_requires_both_output_dimensions(self) -> None:
+        with patch.dict(os.environ, {"OUTPUT_WIDTH": "1280"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "must both be set"):
                 load_settings()
 
     def test_rejects_non_finite_poll_interval(self) -> None:

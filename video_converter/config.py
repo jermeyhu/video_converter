@@ -11,8 +11,8 @@ class Settings:
     output_format: str
     video_codec: str
     audio_codec: str
-    width: int
-    height: int
+    width: int | None
+    height: int | None
     max_concurrent_conversions: int
     poll_interval_seconds: float
     file_stability_seconds: float
@@ -37,6 +37,13 @@ def _positive_even_int(name: str, default: str) -> int:
     return parsed
 
 
+def _optional_positive_even_int(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    return _positive_even_int(name, value)
+
+
 def _positive_float(name: str, default: str) -> float:
     value = os.environ.get(name, default)
     try:
@@ -58,11 +65,16 @@ def load_settings() -> Settings:
     if not output_format.isalnum():
         raise ValueError("OUTPUT_FORMAT must contain only letters and numbers")
 
-    video_codec = os.environ.get("VIDEO_CODEC", "auto")
+    video_codec = os.environ.get("VIDEO_CODEC", "h264").strip().lower()
     audio_codec = os.environ.get("AUDIO_CODEC", "aac")
     for name, value in (("VIDEO_CODEC", video_codec), ("AUDIO_CODEC", audio_codec)):
         if not value or any(char.isspace() for char in value):
             raise ValueError(f"{name} must be a non-empty FFmpeg encoder name")
+
+    width = _optional_positive_even_int("OUTPUT_WIDTH")
+    height = _optional_positive_even_int("OUTPUT_HEIGHT")
+    if (width is None) != (height is None):
+        raise ValueError("OUTPUT_WIDTH and OUTPUT_HEIGHT must both be set or both be omitted")
 
     return Settings(
         input_dir=input_dir,
@@ -70,8 +82,8 @@ def load_settings() -> Settings:
         output_format=output_format,
         video_codec=video_codec,
         audio_codec=audio_codec,
-        width=_positive_even_int("OUTPUT_WIDTH", "1920"),
-        height=_positive_even_int("OUTPUT_HEIGHT", "1080"),
+        width=width,
+        height=height,
         max_concurrent_conversions=_positive_int("MAX_CONCURRENT_CONVERSIONS", "1"),
         poll_interval_seconds=_positive_float("POLL_INTERVAL_SECONDS", "2"),
         file_stability_seconds=_positive_float("FILE_STABILITY_SECONDS", "5"),

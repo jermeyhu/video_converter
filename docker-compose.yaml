@@ -1,0 +1,42 @@
+services:
+  video-converter:
+    image: ghcr.io/jermeyhu/video_converter:latest
+    restart: unless-stopped
+    environment:
+      # 容器内监控目录；主机目录映射见下方 volumes。
+      INPUT_DIR: /data/input
+      OUTPUT_DIR: /data/output
+      # 输出容器格式：mp4、mkv、mov 等；扩展名会与此设置一致，需与所选编码兼容。
+      OUTPUT_FORMAT: mp4
+      # 视频编码格式：
+      # - h264：优先尝试可用的 H.264 硬件编码器（NVIDIA NVENC、Intel QSV、VAAPI），失败时回退 CPU libx264。
+      # - h265：优先尝试可用的 H.265/HEVC 硬件编码器（NVENC、QSV、VAAPI），失败时回退 CPU libx265。
+      # 自动检测需要在下方按需启用 GPU/设备映射；不想自动选择时可填写具体 FFmpeg 编码器名称，
+      # 例如 h264_nvenc、hevc_nvenc、libx264 或 libx265（指定具体编码器后不再自动回退）。
+      VIDEO_CODEC: h264
+      # 音频编码器，例如 aac、libopus；copy 表示不重新编码音频流。
+      AUDIO_CODEC: aac
+      # 输出分辨率；留空时保持源视频分辨率，设置时宽高必须同时填写。
+      OUTPUT_WIDTH: ""
+      OUTPUT_HEIGHT: ""
+      # 同时进行的转换数；多出的任务排队等待。
+      MAX_CONCURRENT_CONVERSIONS: "1"
+      # 目录扫描间隔（秒）和文件保持不变多久后才开始转换（秒）。
+      POLL_INTERVAL_SECONDS: "2"
+      FILE_STABILITY_SECONDS: "5"
+    volumes:
+      - ./input:/data/input
+      - ./output:/data/output
+    # NVIDIA: install NVIDIA Container Toolkit, then uncomment this line:
+    # gpus: all
+    # For older Compose versions, use this instead of "gpus: all":
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # Intel QSV / VAAPI: uncomment these lines instead of NVIDIA settings:
+    # devices:
+    #   - /dev/dri:/dev/dri

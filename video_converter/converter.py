@@ -24,11 +24,11 @@ VIDEO_EXTENSIONS = {
     ".webm",
     ".wmv",
 }
-HARDWARE_ENCODERS = (
-    ("h264_nvenc", "nvidia"),
-    ("h264_qsv", "qsv"),
-    ("h264_vaapi", "vaapi"),
-)
+CODEC_PROFILES = {
+    "h264": ("libx264", (("h264_nvenc", "nvidia"), ("h264_qsv", "qsv"), ("h264_vaapi", "vaapi"))),
+    "h265": ("libx265", (("hevc_nvenc", "nvidia"), ("hevc_qsv", "qsv"), ("hevc_vaapi", "vaapi"))),
+}
+CODEC_ALIASES = {"auto": "h264", "hevc": "h265"}
 
 
 def _available_encoders(ffmpeg_bin: str) -> set[str]:
@@ -72,29 +72,34 @@ def _hardware_device(backend: str) -> str | None:
     return None
 
 
-def _hardware_candidates(encoders: Iterable[str]) -> list[tuple[str, str, str | None]]:
+def _hardware_candidates(
+    encoders: Iterable[str],
+    codec: str,
+) -> list[tuple[str, str, str | None]]:
     available = set(encoders)
     candidates = []
-    for encoder, backend in HARDWARE_ENCODERS:
+    for encoder, backend in CODEC_PROFILES[codec][1]:
         if encoder not in available:
             continue
         device = _hardware_device(backend)
-        if backend == "nvidia" and Path("/dev/nvidia0").exists():
+        if device and backend == "nvidia":
             candidates.append((encoder, backend, None))
         elif device:
             candidates.append((encoder, backend, device))
     return candidates
 
 
-def _scale_filter(settings: Settings, backend: str) -> str:
-    scale = (
-        f"scale={settings.width}:{settings.height}:"
-        "force_original_aspect_ratio=decrease,"
-        f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2"
-    )
+def _video_filter(settings: Settings, backend: str) -> str | None:
+    filters = []
+    if settings.width is not None and settings.height is not None:
+        filters.append(
+            f"scale={settings.width}:{settings.height}:"
+            "force_original_aspect_ratio=decrease,"
+            f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2"
+        )
     if backend == "vaapi":
-        return f"{scale},format=nv12,hwupload"
-    return scale
+        filters.extend(["format=nv12", "hwupload"])
+    return ",".join(filters) or None
 
 
 def _run_ffmpeg(
@@ -108,12 +113,12 @@ def _run_ffmpeg(
     command = [settings.ffmpeg_bin, "-hide_banner", "-nostdin", "-n"]
     if backend == "vaapi" and device:
         command.extend(["-vaapi_device", device])
+    command.extend(["-i", str(source)])
+    video_filter = _video_filter(settings, backend)
+    if video_filter:
+        command.extend(["-vf", video_filter])
     command.extend(
         [
-            "-i",
-            str(source),
-            "-vf",
-            _scale_filter(settings, backend),
             "-c:v",
             video_codec,
             "-c:a",
@@ -152,11 +157,13 @@ def convert_file(settings: Settings, source: Path) -> Path:
         f".{source.stem}.{uuid.uuid4().hex}.partial.{settings.output_format}"
     )
     try:
-        if settings.video_codec != "auto":
+        requested_codec = CODEC_ALIASES.get(settings.video_codec, settings.video_codec)
+        if requested_codec not in CODEC_PROFILES:
             _run_ffmpeg(settings, source, temporary_path, settings.video_codec)
         else:
             encoders = _available_encoders(settings.ffmpeg_bin)
-            hardware_candidates = _hardware_candidates(encoders)
+            software_encoder, _ = CODEC_PROFILES[requested_codec]
+            hardware_candidates = _hardware_candidates(encoders, requested_codec)
             succeeded = False
             for encoder, backend, device in hardware_candidates:
                 try:
@@ -183,11 +190,12 @@ def convert_file(settings: Settings, source: Path) -> Path:
             if not succeeded:
                 if hardware_candidates:
                     LOGGER.warning("Hardware encoders failed for %s; falling back to CPU", source)
-                if "libx264" not in encoders:
+                if software_encoder not in encoders:
                     raise RuntimeError(
-                        "No supported hardware encoder worked and FFmpeg does not provide libx264"
+                        f"No supported hardware encoder worked and FFmpeg does not "
+                        f"provide {software_encoder}"
                     )
-                _run_ffmpeg(settings, source, temporary_path, "libx264")
+                _run_ffmpeg(settings, source, temporary_path, software_encoder)
 
         _commit_without_overwrite(temporary_path, destination)
         LOGGER.info("Converted %s -> %s", source, destination)

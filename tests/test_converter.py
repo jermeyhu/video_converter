@@ -9,19 +9,25 @@ from video_converter.converter import (
     _available_encoders,
     _hardware_candidates,
     _hardware_device,
+    _run_ffmpeg,
     convert_file,
 )
 
 
-def make_settings(output_dir: Path, video_codec: str = "auto") -> Settings:
+def make_settings(
+    output_dir: Path,
+    video_codec: str = "h264",
+    width: int | None = None,
+    height: int | None = None,
+) -> Settings:
     return Settings(
         input_dir=output_dir.parent / "input",
         output_dir=output_dir,
         output_format="mp4",
         video_codec=video_codec,
         audio_codec="aac",
-        width=1920,
-        height=1080,
+        width=width,
+        height=height,
         max_concurrent_conversions=1,
         poll_interval_seconds=1,
         file_stability_seconds=1,
@@ -52,10 +58,33 @@ class HardwareDetectionTests(unittest.TestCase):
         with (
             patch("video_converter.converter._hardware_device", return_value="/dev/dri/renderD128") as device,
         ):
-            candidates = _hardware_candidates({"h264_qsv"})
+            candidates = _hardware_candidates({"h264_qsv"}, "h264")
 
         self.assertEqual(candidates, [("h264_qsv", "qsv", "/dev/dri/renderD128")])
         device.assert_called_once_with("qsv")
+
+    def test_h265_candidates_use_hevc_encoders(self) -> None:
+        with patch(
+            "video_converter.converter._hardware_device",
+            side_effect=lambda backend: {
+                "nvidia": "nvidia",
+                "qsv": "/dev/dri/renderD128",
+                "vaapi": "/dev/dri/renderD128",
+            }[backend],
+        ):
+            candidates = _hardware_candidates(
+                {"hevc_nvenc", "hevc_qsv", "hevc_vaapi", "h264_nvenc"},
+                "h265",
+            )
+
+        self.assertEqual(
+            candidates,
+            [
+                ("hevc_nvenc", "nvidia", None),
+                ("hevc_qsv", "qsv", "/dev/dri/renderD128"),
+                ("hevc_vaapi", "vaapi", "/dev/dri/renderD128"),
+            ],
+        )
 
     def test_nvidia_requires_exposed_device(self) -> None:
         with patch("video_converter.converter.Path.exists", return_value=False), patch(
@@ -66,6 +95,44 @@ class HardwareDetectionTests(unittest.TestCase):
 
 
 class ConversionTests(unittest.TestCase):
+    def test_keeps_source_resolution_when_dimensions_are_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = make_settings(Path(temp) / "output")
+            with patch(
+                "video_converter.converter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_ffmpeg:
+                _run_ffmpeg(
+                    settings,
+                    Path(temp) / "input.mp4",
+                    Path(temp) / "output.mp4",
+                    "libx264",
+                )
+
+        command = run_ffmpeg.call_args.args[0]
+        self.assertNotIn("-vf", command)
+
+    def test_applies_scale_filter_when_dimensions_are_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = make_settings(Path(temp) / "output", width=1280, height=720)
+            with patch(
+                "video_converter.converter.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_ffmpeg:
+                _run_ffmpeg(
+                    settings,
+                    Path(temp) / "input.mp4",
+                    Path(temp) / "output.mp4",
+                    "libx264",
+                )
+
+        command = run_ffmpeg.call_args.args[0]
+        self.assertIn("-vf", command)
+        self.assertIn(
+            "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            command,
+        )
+
     def test_uses_available_hardware_encoder_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -136,6 +203,38 @@ class ConversionTests(unittest.TestCase):
                 convert_file(make_settings(output), source)
 
             self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_h265_hardware_failure_falls_back_to_libx265(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "output"
+            output.mkdir()
+            source = root / "clip.mov"
+            source.touch()
+            settings = make_settings(output, video_codec="h265")
+            calls: list[str] = []
+
+            def encode(_settings, _source, destination, codec, *_args):
+                calls.append(codec)
+                if codec == "hevc_nvenc":
+                    raise RuntimeError("hardware encoder unavailable")
+                Path(destination).write_bytes(b"software video")
+
+            with (
+                patch(
+                    "video_converter.converter._available_encoders",
+                    return_value={"hevc_nvenc", "libx265"},
+                ),
+                patch(
+                    "video_converter.converter._hardware_candidates",
+                    return_value=[("hevc_nvenc", "nvidia", None)],
+                ),
+                patch("video_converter.converter._run_ffmpeg", side_effect=encode),
+            ):
+                destination = convert_file(settings, source)
+
+            self.assertEqual(calls, ["hevc_nvenc", "libx265"])
+            self.assertEqual(destination.read_bytes(), b"software video")
 
     def test_explicit_encoder_skips_automatic_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
