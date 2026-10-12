@@ -1,0 +1,4 @@
+services:
+  video-converter:
+    devices:
+      - /dev/dri:/dev/dri
