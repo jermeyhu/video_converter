@@ -13,6 +13,19 @@ from video_converter.web import start_server
 LOGGER = logging.getLogger(__name__)
 
 
+def _move_to_processed(source: Path) -> Path:
+    processed_dir = source.parent / "processed"
+    processed_dir.mkdir(exist_ok=True)
+    destination = processed_dir / source.name
+    suffix = 1
+    while destination.exists():
+        destination = processed_dir / f"{source.stem} ({suffix}){source.suffix}"
+        suffix += 1
+    source.rename(destination)
+    LOGGER.info("Moved converted input %s -> %s", source, destination)
+    return destination
+
+
 def run(
     settings: Settings,
     stop_event: Event | None = None,
@@ -48,6 +61,7 @@ def run(
 
         try:
             destination = convert_file(settings, source, on_progress=on_progress)
+            _move_to_processed(source)
         except Exception as exc:
             status_store.update(source, status="failed", error=str(exc), progress=None)
             raise

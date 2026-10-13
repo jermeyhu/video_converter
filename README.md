@@ -1,6 +1,6 @@
 # FFmpeg 视频目录转换器
 
-这是一个基于 Docker 的视频转换服务：监听输入目录的顶层文件，使用 FFmpeg 转换视频，并将结果写入独立的输出目录。原始文件会保留，不会被修改或删除。
+这是一个基于 Docker 的视频转换服务：监听输入目录的顶层文件，使用 FFmpeg 转换视频，并将结果写入独立的输出目录。转换成功后，源视频会移动到输入目录下的 `processed` 子目录，避免重复转换；转换失败时源视频保留在输入目录。
 
 ## 快速启动
 
@@ -12,7 +12,7 @@ docker compose -f docker-compose.yaml up -d
 
 使用 `ghcr.io/jermeyhu/video_converter:latest` 镜像，挂载当前目录下的 `input`、`output` 文件夹。修改配置时编辑 Compose 文件中的 `environment` 值。
 
-将视频复制到 `input` 目录。服务会等到文件大小和修改时间在 `FILE_STABILITY_SECONDS` 秒内保持不变后，再把它加入转换队列。
+将视频复制到 `input` 目录。服务会等到文件大小和修改时间在 `FILE_STABILITY_SECONDS` 秒内保持不变后，再把它加入转换队列。转换成功的原始文件会自动移动到 `input/processed`，该子目录不会被扫描。
 
 ### 状态页面
 
@@ -92,7 +92,7 @@ Compose 直接拉取 GitHub Actions 发布到 GHCR 的 `ghcr.io/jermeyhu/video_c
 
 ## 队列与失败处理
 
-转换工作线程数量由 `MAX_CONCURRENT_CONVERSIONS` 限制，超出的文件会进入内存队列等待，因此同时运行的 FFmpeg 进程数不会超过配置值。队列不持久化；服务重启后会重新扫描输入目录并重建任务。转换失败会记录日志；同一文件只有在内容或修改时间变化后才会再次尝试。转换期间的临时文件会被清理，输入文件始终保留。
+转换工作线程数量由 `MAX_CONCURRENT_CONVERSIONS` 限制，超出的文件会进入内存队列等待，因此同时运行的 FFmpeg 进程数不会超过配置值。队列不持久化；服务重启后会重新扫描输入目录并重建任务。转换失败会记录日志，源文件保留在输入目录；转换成功则移动至 `input/processed`，若归档文件名已存在会自动添加序号，不会覆盖。转换期间的临时文件会被清理。
 
 修改配置后应用变更，或拉取 GitHub Actions 发布的新镜像并重建容器：
 

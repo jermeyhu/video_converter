@@ -6,10 +6,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 from video_converter.config import Settings
-from video_converter.watcher import run
+from video_converter.watcher import _move_to_processed, run
 
 
 class WatcherQueueTests(unittest.TestCase):
+    def test_archiving_does_not_overwrite_processed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            input_dir = Path(temp) / "input"
+            processed_dir = input_dir / "processed"
+            processed_dir.mkdir(parents=True)
+            source = input_dir / "clip.mp4"
+            source.write_text("new source")
+            (processed_dir / "clip.mp4").write_text("previous archive")
+
+            archived = _move_to_processed(source)
+
+            self.assertEqual(archived.name, "clip (1).mp4")
+            self.assertEqual(archived.read_text(), "new source")
+            self.assertEqual(
+                (processed_dir / "clip.mp4").read_text(),
+                "previous archive",
+            )
+
     def test_conversion_workers_are_bounded_and_excess_files_are_queued(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -64,6 +82,14 @@ class WatcherQueueTests(unittest.TestCase):
             self.assertFalse(watcher.is_alive(), "watcher did not stop")
             self.assertEqual(completed, 4)
             self.assertEqual(maximum_active, 2)
+            self.assertEqual(
+                sorted(path.name for path in (input_dir / "processed").iterdir()),
+                [f"clip-{index}.mp4" for index in range(4)],
+            )
+            self.assertEqual(
+                list(input_dir.glob("*.mp4")),
+                [],
+            )
 
 
 if __name__ == "__main__":
