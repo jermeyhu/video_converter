@@ -122,7 +122,7 @@ docker compose -f docker-compose.yaml down
 
 ## GitHub Actions 镜像发布
 
-`.github/workflows/publish-image.yml` 会在构建前运行单元测试并校验 Compose 配置；Pull Request 仅验证、不发布镜像。推送到默认分支或推送版本标签（例如 `v1.2.3`）时，会构建多架构 `linux/amd64`、`linux/arm64` 镜像并发布到 GitHub Container Registry。默认分支还会更新 `latest` 标签。工作流需要仓库 Actions 的 `packages: write` 权限（已在工作流中声明）。首次发布后，如需公开拉取，在 GitHub Packages 设置中将该容器包的可见性改为 Public。
+`.github/workflows/publish-image.yml` 会在 Pull Request 和 GitHub Release 发布时运行单元测试并校验 Compose 配置；只有发布 Release 时才会构建并推送多架构 `linux/amd64`、`linux/arm64` 镜像到 GitHub Container Registry，并同时更新 Release 对应的标签和 `latest`。普通分支提交不会触发镜像打包。工作流需要仓库 Actions 的 `packages: write` 权限（已在工作流中声明）。首次发布后，如需公开拉取，在 GitHub Packages 设置中将该容器包的可见性改为 Public。
 
 ## 本地运行测试
 
