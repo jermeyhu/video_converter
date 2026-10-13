@@ -94,6 +94,7 @@ def _hardware_device(ffmpeg_bin: str = "ffmpeg") -> str | None:
 
 @lru_cache(maxsize=32)
 def _vaapi_encoder_works(ffmpeg_bin: str, device: str, encoder: str) -> bool:
+    profile = "main"
     command = [
         ffmpeg_bin,
         "-hide_banner",
@@ -113,6 +114,8 @@ def _vaapi_encoder_works(ffmpeg_bin: str, device: str, encoder: str) -> bool:
         "format=nv12,hwupload",
         "-c:v",
         encoder,
+        "-profile:v",
+        profile,
         "-f",
         "null",
         "-",
@@ -301,6 +304,8 @@ def _run_ffmpeg(
             "-dn",
         ]
     )
+    if backend == "vaapi":
+        command.extend(["-profile:v", "main"])
     if settings.output_format == "mp4":
         command.extend(["-movflags", "+faststart"])
     command.extend(["-f", settings.output_format, str(destination)])

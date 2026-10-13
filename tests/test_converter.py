@@ -73,6 +73,8 @@ class HardwareDetectionTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("vaapi=hw:/dev/dri/renderD128", command)
         self.assertIn("h264_vaapi", command)
+        self.assertIn("-profile:v", command)
+        self.assertIn("main", command)
         self.assertIn("testsrc2=size=128x128:rate=1", command)
 
     def test_vaapi_decode_profiles_include_only_vld_entries(self) -> None:
@@ -303,6 +305,8 @@ class ConversionTests(unittest.TestCase):
         self.assertIn("vaapi", command)
         self.assertIn("-hwaccel_output_format", command)
         self.assertIn("-hwaccel_device", command)
+        self.assertIn("-profile:v", command)
+        self.assertIn("main", command)
 
     def test_applies_scale_filter_when_dimensions_are_configured(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
