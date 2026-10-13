@@ -1,9 +1,13 @@
 FROM python:3.12-slim
 
-RUN apt-get update \
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
+            /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg mesa-va-drivers vainfo \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-        apt-get install --no-install-recommends -y intel-media-va-driver i965-va-driver; \
+        apt-get install --no-install-recommends -y intel-media-va-driver-non-free i965-va-driver; \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
