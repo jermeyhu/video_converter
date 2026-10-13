@@ -35,7 +35,7 @@ def _positive_int(name: str, default: str) -> int:
 def _positive_even_int(name: str, default: str) -> int:
     parsed = _positive_int(name, default)
     if parsed % 2:
-        raise ValueError(f"{name} must be an even integer for H.264 video encoding, got {parsed}")
+        raise ValueError(f"{name} must be an even integer for video encoding, got {parsed}")
     return parsed
 
 
@@ -55,6 +55,13 @@ def _positive_float(name: str, default: str) -> float:
     if not math.isfinite(parsed) or parsed <= 0:
         raise ValueError(f"{name} must be a positive number, got {value!r}")
     return parsed
+
+
+def _web_port() -> int:
+    port = _positive_int("WEB_PORT", "5800")
+    if port > 65535:
+        raise ValueError(f"WEB_PORT must be between 1 and 65535, got {port}")
+    return port
 
 
 def load_settings() -> Settings:
@@ -91,5 +98,5 @@ def load_settings() -> Settings:
         file_stability_seconds=_positive_float("FILE_STABILITY_SECONDS", "5"),
         ffmpeg_bin=os.environ.get("FFMPEG_BIN", "ffmpeg"),
         ffprobe_bin=os.environ.get("FFPROBE_BIN", "ffprobe"),
-        web_port=_positive_int("WEB_PORT", "5800"),
+        web_port=_web_port(),
     )

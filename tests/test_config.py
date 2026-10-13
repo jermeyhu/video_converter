@@ -13,6 +13,7 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_concurrent_conversions, 1)
         self.assertEqual(settings.video_codec, "h264")
         self.assertEqual(settings.output_format, "mp4")
+        self.assertEqual(settings.web_port, 5800)
         self.assertIsNone(settings.width)
         self.assertIsNone(settings.height)
 
@@ -32,6 +33,17 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_concurrent_conversions, 3)
         self.assertEqual((settings.width, settings.height), (1280, 720))
         self.assertEqual(settings.output_format, "mkv")
+
+    def test_configures_web_port_from_environment(self) -> None:
+        with patch.dict(os.environ, {"WEB_PORT": "8080"}, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.web_port, 8080)
+
+    def test_rejects_web_port_outside_tcp_range(self) -> None:
+        with patch.dict(os.environ, {"WEB_PORT": "65536"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "WEB_PORT must be between 1 and 65535"):
+                load_settings()
 
     def test_selects_h265_profile_from_environment(self) -> None:
         with patch.dict(os.environ, {"VIDEO_CODEC": "h265"}, clear=True):
@@ -55,7 +67,7 @@ class LoadSettingsTests(unittest.TestCase):
 
     def test_rejects_odd_output_dimensions(self) -> None:
         with patch.dict(os.environ, {"OUTPUT_WIDTH": "1279"}, clear=True):
-            with self.assertRaisesRegex(ValueError, "OUTPUT_WIDTH must be an even integer"):
+            with self.assertRaisesRegex(ValueError, "OUTPUT_WIDTH must be an even integer for video encoding"):
                 load_settings()
 
     def test_requires_both_output_dimensions(self) -> None:

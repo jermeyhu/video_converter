@@ -8,7 +8,7 @@ services:
       OUTPUT_DIR: /data/output
       # 输出容器格式：mp4、mkv、mov 等；扩展名会与此设置一致，需与所选编码兼容。
       OUTPUT_FORMAT: mp4
-      # 视频编码格式：h264 或 h265。自动尝试 VAAPI，失败时回退 CPU。
+      # 视频编码格式：h264、h265 或 av1。硬件编码优先，失败时回退 CPU。
       VIDEO_CODEC: h264
       # 音频编码器，例如 aac、libopus；copy 表示不重新编码音频流。
       AUDIO_CODEC: aac
@@ -20,12 +20,21 @@ services:
       # 目录扫描间隔（秒）和文件保持不变多久后才开始转换（秒）。
       POLL_INTERVAL_SECONDS: "2"
       FILE_STABILITY_SECONDS: "5"
-      WEB_PORT: "5800"
+      WEB_PORT: "${WEB_PORT:-5800}"
     ports:
-      - "5800:5800"
+      - "${WEB_PORT:-5800}:${WEB_PORT:-5800}"
     volumes:
-      - ./input:/data/input
-      - ./output:/data/output
-    # Linux VAAPI (Intel/AMD)
+      - "${HOST_INPUT_DIR:-./input}:/data/input"
+      - "${HOST_OUTPUT_DIR:-./output}:/data/output"
+    # Intel QSV/VAAPI、AMD VAAPI；纯 NVIDIA 主机需删除此段。
     devices:
       - /dev/dri:/dev/dri
+    # NVIDIA：安装 NVIDIA 驱动和 Container Toolkit 后取消整个段落注释。
+    # NVIDIA-only 主机同时删除上方 devices 段，避免挂载不存在的 /dev/dri。
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

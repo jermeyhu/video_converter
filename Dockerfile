@@ -19,6 +19,7 @@ COPY video_converter /app/video_converter
 ENV PATH="/usr/lib/jellyfin-ffmpeg:${PATH}" \
     FFMPEG_BIN=/usr/lib/jellyfin-ffmpeg/ffmpeg \
     FFPROBE_BIN=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
     PYTHONUNBUFFERED=1 \
     INPUT_DIR=/data/input \
     OUTPUT_DIR=/data/output \

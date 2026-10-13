@@ -19,8 +19,8 @@ docker compose -f docker-compose.yaml up -d
 服务启动后会打开一个 Web 状态页面（默认 `http://localhost:5800`），可实时查看：
 
 - 等待队列、正在转换、已完成、失败的数量
-- 每个任务的进度条、已用时间、实际使用的编码器与后端（VAAPI / CPU）
-- VAAPI 的 H.264 / HEVC 硬件解码、硬件编码能力及 render device 状态
+- 每个任务的进度条、已用时间、实际使用的编码器、解码后端与编码后端
+- NVIDIA NVENC、Intel QSV、Intel/AMD VAAPI 对 H.264、HEVC、AV1 的独立解码/编码探测
 
 ```powershell
 docker compose -f docker-compose.yaml logs -f
@@ -37,14 +37,18 @@ docker compose -f docker-compose.yaml logs -f
 | `INPUT_DIR` | `/data/input` | 容器内输入目录。 |
 | `OUTPUT_DIR` | `/data/output` | 容器内输出目录，必须与 `INPUT_DIR` 不同。 |
 | `OUTPUT_FORMAT` | `mp4` | FFmpeg 输出容器格式及文件扩展名，例如 `mkv`、`webm`、`mov`。请为容器选择兼容的编码器。 |
-| `VIDEO_CODEC` | `h264` | 设置编码格式为 `h264` 或 `h265`，自动检测对应 VAAPI 编码器；硬件不可用或失败时分别回退到 `libx264` / `libx265`。也可指定具体 FFmpeg 编码器名称，此时直接使用该编码器。 |
+| `VIDEO_CODEC` | `h264` | 输出视频编码格式：`h264`、`h265` 或 `av1`（别名：`auto`、`hevc`、`av01`）。自动探测 NVENC、QSV、VAAPI 编码器；目标硬件格式不可用或运行失败时使用 CPU 编码器。也可指定具体 FFmpeg 编码器名称。 |
 | `AUDIO_CODEC` | `aac` | FFmpeg 音频编码器，例如 `aac`、`libopus` 或 `copy`。默认会重新编码音频。 |
 | `OUTPUT_WIDTH` | 未设置 | 可选输出宽度，必须为正偶数；须与 `OUTPUT_HEIGHT` 同时设置。 |
 | `OUTPUT_HEIGHT` | 未设置 | 可选输出高度，必须为正偶数；须与 `OUTPUT_WIDTH` 同时设置。 |
 | `MAX_CONCURRENT_CONVERSIONS` | `1` | 最大同时转换数。其余稳定文件会排队等待。 |
 | `POLL_INTERVAL_SECONDS` | `2` | 扫描目录的时间间隔。 |
 | `FILE_STABILITY_SECONDS` | `5` | 输入文件保持不变多久后才开始排队。 |
+| `WEB_PORT` | `5800` | 状态页面容器端口及映射到主机的端口。 |
 | `FFMPEG_BIN` | `ffmpeg` | FFmpeg 可执行文件路径（在 Docker 外运行时可用）。 |
+| `FFPROBE_BIN` | `ffprobe` | ffprobe 可执行文件路径（在 Docker 外运行时可用）。 |
+
+`HOST_INPUT_DIR` 和 `HOST_OUTPUT_DIR` 是 Compose 插值变量，用于指定主机输入、输出目录（默认 `./input`、`./output`），不会传入容器；可在 Compose 所在目录的 `.env` 文件中设置。`WEB_PORT` 也可在 `.env` 中设置，并同步更改容器监听端口和主机端口映射。
 
 `OUTPUT_WIDTH` 和 `OUTPUT_HEIGHT` 默认不设置，需同时设置才会缩放。服务只监控输入目录顶层，不递归处理子目录。支持的输入扩展名包括 MP4、MKV、MOV、AVI、WebM、MPEG/MPG、M4V、TS/MTS/M2TS、FLV、WMV 和 3GP。
 
@@ -59,7 +63,7 @@ docker compose -f docker-compose.yaml logs -f
       OUTPUT_HEIGHT: "720"
 ```
 
-选择 H.264 或 H.265 时，只需将 Compose 中的编码配置设为：
+选择 H.264、H.265 或 AV1 时，只需将 Compose 中的编码配置设为：
 
 ```yaml
       VIDEO_CODEC: h264
@@ -71,26 +75,33 @@ docker compose -f docker-compose.yaml logs -f
       VIDEO_CODEC: h265
 ```
 
+或：
+
+```yaml
+      VIDEO_CODEC: av1
+```
+
 ## 硬件加速
 
-项目只提供 Linux VAAPI 硬件路径。`VIDEO_CODEC=h264` 尝试 `h264_vaapi`；`VIDEO_CODEC=h265` 尝试 `hevc_vaapi`。如果显卡不支持硬件编码，但支持当前输入格式的硬件解码，则使用 VAAPI 解码并由 CPU `libx264` / `libx265` 编码；如果输入无法硬解，再回退到 CPU 全软解/软编码。指定其他具体 FFmpeg 编码器名时，会直接使用该编码器，不进行自动检测或回退；只有以 `_vaapi` 结尾的显式硬件编码器会同时启用 VAAPI 解码。
+镜像使用 Jellyfin 官方 `jellyfin-ffmpeg8`，自动探测 Linux 下的 NVIDIA NVENC、Intel QSV 与 VAAPI（Intel iHD/i965、AMD RadeonSI）。对每种 codec，编码与解码能力分别用独立的实际 FFmpeg 操作探测；每个阶段优先用可用硬件，不支持或运行失败时该阶段单独回退 CPU。解码与编码可来自不同硬件后端，例如 VAAPI 解码后交给 NVENC 编码。支持的输出视频 codec 为 H.264、HEVC/H.265 和 AV1；具体能力取决于 GPU 世代、驱动、FFmpeg 构建与输入 profile。
 
 ### 硬件解码与转码
 
-启用 VAAPI 时，FFmpeg 使用同一 `/dev/dri/renderD*` 设备进行硬件解码和硬件编码：
+硬件解码和编码各自选择通过探测的设备，不要求来自同一厂商或后端：
 
-- **Intel 核显：** 镜像使用 Jellyfin 官方 `jellyfin-ffmpeg8` Debian 包，其中包含 VAAPI 所需的 Intel 用户态媒体驱动；iHD 用于 Broadwell（Gen8）及更新平台，i965 用于更早的平台。Linux VAAPI 兼容 Intel 的 GPU 范围较广，解码/编码格式仍取决于 GPU 世代和驱动。
-- **AMD 核显/显卡：** 同一 Jellyfin FFmpeg 包包含 Mesa VAAPI 用户态驱动（`radeonsi`）；宿主机仍需提供 AMDGPU 内核驱动、固件并映射 `/dev/dri`。Jellyfin 文档指出 GCN 起支持 VAAPI，而 Polaris（RX 400/500）及更新 GPU 才有完整加速；具体编码格式因型号而异，RX 6400/6500 系列没有视频编码器。
+- **NVIDIA：** 需要宿主机安装 NVIDIA 驱动和 NVIDIA Container Toolkit。镜像默认设置 `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`，无需额外配置；Compose 示例中的 `deploy.resources.reservations.devices` 仍需取消注释以将 GPU 暴露给容器。容器不会打包宿主机专有的 NVIDIA 驱动。
+- **Intel：** QSV 与 VAAPI 使用映射进容器的 `/dev/dri` render node。iHD 适用于 Broadwell（Gen8）及更新平台，i965 适用于更早的平台。
+- **AMD：** Linux 上通过 VAAPI / Mesa RadeonSI，依赖宿主机 AMDGPU 内核驱动、固件和 `/dev/dri` 映射。编码格式受 GPU 世代限制；部分型号（如 RX 6400/6500）没有视频编码器。
 
-未设置输出尺寸时，硬件帧直接从硬件解码器传到对应硬件编码器。设置 `OUTPUT_WIDTH` / `OUTPUT_HEIGHT` 时，当前实现先将硬件解码帧下载到系统内存，再用 FFmpeg 的通用 `scale` / `pad` 滤镜保持比例并补边，最后上传到同一硬件设备编码。此时解码和编码仍由硬件完成，但缩放/补边由 CPU 执行；该路径避免依赖各后端并不一致的 padding 滤镜。
+当解码和编码后端不同，或设置 `OUTPUT_WIDTH` / `OUTPUT_HEIGHT` 时，帧会在后端间经系统内存转换；比例缩放与补边由 CPU 执行。后端相同且不需要缩放时可直接传递硬件帧。
 
-状态页分别显示 H.264 / HEVC 的 VAAPI 硬件解码与硬件编码能力。解码能力来自 `vainfo` profile/entrypoint（`VAEntrypointVLD` 表示解码，`VAEntrypointEncSlice` 表示编码）；编码能力会以 640x360 测试帧和实际码率依次尝试可用 profile，而不是仅依据 FFmpeg 编码器列表判断。未设置 `LIBVA_DRIVER_NAME` 时由 libva 自动选择驱动；只有自动选择错误时才手动指定。不同 GPU 世代支持的 profile、位深和格式不同，不保证任意输入都可硬解；每个任务仍会按实际输入尝试硬解，失败时回退 CPU。
+状态页对三个后端和三种 codec 分别展示解码/编码能力。编码探测会输出小型合成视频；解码探测会先生成对应格式的测试视频，再尝试使用硬件解码。实际转换会按输入文件尝试所有可初始化的硬件解码设备，不因输出 codec 不同而跳过潜在可用的解码器；该输入无法硬解时再单独回退 CPU。FFmpeg 是否编入编码器不是硬件可用的充分条件；只有实际探测成功才优先选用。真实媒体的位深、profile 或像素格式仍可能超出设备能力，此时仅失败的解码或编码阶段改用 CPU。
 
-本项目只实现 Linux VAAPI，不启用 Intel QSV 或 AMD AMF。Jellyfin 文档指出 VAAPI 兼容 Intel 的 GPU 范围广，AMD Linux 推荐 VAAPI；请参考 [Jellyfin Intel 硬件加速文档](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/intel/) 和 [AMD 文档](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/amd/)。
+自动编码后端优先顺序为 NVENC、QSV、VAAPI。显式设置具体 FFmpeg 编码器（如 `h264_nvenc`、`hevc_qsv` 或 `av1_vaapi`）时会使用该编码器；若相应设备无法初始化，任务会明确失败。
 
-Compose 直接拉取 GitHub Actions 发布到 GHCR 的 `ghcr.io/jermeyhu/video_converter:latest` 多架构镜像，不在 NAS 上本地构建。容器使用 Jellyfin 官方 `jellyfin-ffmpeg8`、`ffprobe` 和 `vainfo`，并将 `/usr/lib/jellyfin-ffmpeg` 配置为默认工具路径；这样编码探测、转码和解码能力检测使用同一套用户态驱动。配置默认映射 Linux 主机的 `/dev/dri`，因此仅适用于有 VAAPI 设备节点的 Linux 主机；启动前确认宿主机存在 `/dev/dri/renderD*`。主机仍需提供匹配的内核驱动、固件及容器设备访问权限。
+Compose 直接拉取 GHCR 多架构镜像。Intel/AMD 默认映射 `/dev/dri`，启动前确认设备存在并允许容器访问。NVIDIA 主机需先安装驱动和 Container Toolkit，再取消 Compose 文件中完整 `deploy.resources.reservations.devices` 段落的注释。纯 NVIDIA 主机还需移除 `devices: /dev/dri` 段落，否则主机不存在该路径时容器无法启动。随后执行 `docker compose -f docker-compose.yaml up -d`；可用 `docker compose exec video-converter nvidia-smi` 确认 GPU 已传入容器。
 
-可通过 `docker compose exec video-converter vainfo --display drm --device /dev/dri/renderD128` 验证驱动是否能访问设备。VAAPI 可用的编码 profile 随 GPU 型号而异，例如部分旧 Intel/AMD 核显不支持 HEVC 编码；此时 H.265 转换会由 CPU 完成。
+Intel/AMD 可通过 `docker compose exec video-converter vainfo --display drm --device /dev/dri/renderD128` 查看 VAAPI profiles。参考 [Jellyfin Intel](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/intel/)、[AMD](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/amd/) 与 [NVIDIA](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/nvidia/) 文档。
 
 ## 队列与失败处理
 
@@ -111,7 +122,7 @@ docker compose -f docker-compose.yaml down
 
 ## GitHub Actions 镜像发布
 
-`.github/workflows/publish-image.yml` 会在 Pull Request 上构建镜像用于验证，但不会发布；推送到默认分支或推送版本标签（例如 `v1.2.3`）时，会构建多架构 `linux/amd64`、`linux/arm64` 镜像并发布到 GitHub Container Registry。默认分支还会更新 `latest` 标签。工作流需要仓库 Actions 的 `packages: write` 权限（已在工作流中声明）。首次发布后，如需公开拉取，在 GitHub Packages 设置中将该容器包的可见性改为 Public。
+`.github/workflows/publish-image.yml` 会在构建前运行单元测试并校验 Compose 配置；Pull Request 仅验证、不发布镜像。推送到默认分支或推送版本标签（例如 `v1.2.3`）时，会构建多架构 `linux/amd64`、`linux/arm64` 镜像并发布到 GitHub Container Registry。默认分支还会更新 `latest` 标签。工作流需要仓库 Actions 的 `packages: write` 权限（已在工作流中声明）。首次发布后，如需公开拉取，在 GitHub Packages 设置中将该容器包的可见性改为 Public。
 
 ## 本地运行测试
 
