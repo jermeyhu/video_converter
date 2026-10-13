@@ -20,7 +20,7 @@ docker compose -f docker-compose.yaml up -d
 
 - 等待队列、正在转换、已完成、失败的数量
 - 每个任务的进度条、已用时间、实际使用的编码器与后端（VAAPI / CPU）
-- VAAPI 的 H.264 / HEVC 编码器和 render device 检测状态
+- VAAPI 的 H.264 / HEVC 硬件解码、硬件编码能力及 render device 状态
 
 ```powershell
 docker compose -f docker-compose.yaml logs -f
@@ -73,7 +73,7 @@ docker compose -f docker-compose.yaml logs -f
 
 ## 硬件加速
 
-项目只提供 Linux VAAPI 硬件路径。`VIDEO_CODEC=h264` 尝试 `h264_vaapi`；`VIDEO_CODEC=h265` 尝试 `hevc_vaapi`。如果驱动、设备或当前输入不支持该路径，则回退到 CPU `libx264` / `libx265`。指定其他具体 FFmpeg 编码器名时，会直接使用该编码器，不进行自动检测或回退；只有以 `_vaapi` 结尾的显式硬件编码器会同时启用 VAAPI 解码。
+项目只提供 Linux VAAPI 硬件路径。`VIDEO_CODEC=h264` 尝试 `h264_vaapi`；`VIDEO_CODEC=h265` 尝试 `hevc_vaapi`。如果显卡不支持硬件编码，但支持当前输入格式的硬件解码，则使用 VAAPI 解码并由 CPU `libx264` / `libx265` 编码；如果输入无法硬解，再回退到 CPU 全软解/软编码。指定其他具体 FFmpeg 编码器名时，会直接使用该编码器，不进行自动检测或回退；只有以 `_vaapi` 结尾的显式硬件编码器会同时启用 VAAPI 解码。
 
 ### 硬件解码与转码
 
@@ -84,7 +84,7 @@ docker compose -f docker-compose.yaml logs -f
 
 未设置输出尺寸时，硬件帧直接从硬件解码器传到对应硬件编码器。设置 `OUTPUT_WIDTH` / `OUTPUT_HEIGHT` 时，当前实现先将硬件解码帧下载到系统内存，再用 FFmpeg 的通用 `scale` / `pad` 滤镜保持比例并补边，最后上传到同一硬件设备编码。此时解码和编码仍由硬件完成，但缩放/补边由 CPU 执行；该路径避免依赖各后端并不一致的 padding 滤镜。
 
-状态页会分别用小型测试视频实际尝试 H.264 / HEVC VAAPI 编码，因此硬件或驱动不支持的编码格式会显示为不可用；不保证任意输入编码格式、位深都可硬件解码。转换任务会实际尝试 VAAPI，失败后回退 CPU。
+状态页分别显示 H.264 / HEVC 的 VAAPI 硬件解码与硬件编码能力。解码能力来自 `vainfo` profile/entrypoint，编码能力会通过小型测试视频实际尝试；不保证任意输入编码格式、位深都可硬件解码。每个任务会按实际输入尝试硬解；解码失败会回退 CPU。
 
 Compose 直接拉取 GitHub Actions 发布到 GHCR 的 `ghcr.io/jermeyhu/video_converter:latest` 多架构镜像，不在 NAS 上本地构建。配置默认映射 Linux 主机的 `/dev/dri`，因此仅适用于有 VAAPI 设备节点的 Linux 主机；启动前确认宿主机存在 `/dev/dri/renderD*`。容器镜像内含 AMD Mesa 与 Intel 新旧代 VAAPI 用户态驱动；主机仍需提供匹配的内核驱动和固件。
 

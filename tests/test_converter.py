@@ -9,6 +9,7 @@ from video_converter.converter import (
     _available_encoders,
     _hardware_candidates,
     _hardware_device,
+    _vaapi_decode_profiles,
     _vaapi_encoder_works,
     _video_filter,
     _run_ffmpeg,
@@ -74,6 +75,25 @@ class HardwareDetectionTests(unittest.TestCase):
         self.assertIn("h264_vaapi", command)
         self.assertIn("testsrc2=size=128x128:rate=1", command)
 
+    def test_vaapi_decode_profiles_include_only_vld_entries(self) -> None:
+        _vaapi_decode_profiles.cache_clear()
+        with patch(
+            "video_converter.converter.subprocess.run",
+            return_value=SimpleNamespace(
+                stdout=(
+                    "VAProfileH264High : VAEntrypointVLD\n"
+                    "VAProfileH264High : VAEntrypointEncSlice\n"
+                    "VAProfileHEVCMain : VAEntrypointVLD\n"
+                    "VAProfileVP8Version0_3 : VAEntrypointVLD\n"
+                ),
+                stderr="",
+            ),
+        ):
+            profiles = _vaapi_decode_profiles("/dev/dri/renderD128")
+
+        self.assertEqual(profiles, {"h264", "h265"})
+        _vaapi_decode_profiles.cache_clear()
+
     def test_hardware_candidate_requires_encoder_and_device(self) -> None:
         with patch(
             "video_converter.converter._hardware_device",
@@ -123,6 +143,7 @@ class HardwareDetectionTests(unittest.TestCase):
         self.assertEqual(candidates, [])
 
     def test_vaapi_device_must_initialize_successfully(self) -> None:
+        _hardware_device.cache_clear()
         render_device = Path("/dev/dri/renderD128")
         with patch(
             "video_converter.converter.Path.glob",
@@ -134,6 +155,7 @@ class HardwareDetectionTests(unittest.TestCase):
             self.assertIsNone(_hardware_device("ffmpeg"))
 
         initialize.assert_called_once_with("ffmpeg", f"vaapi=hw:{render_device}")
+        _hardware_device.cache_clear()
 
     def test_hardware_status_requires_a_device(self) -> None:
         settings = make_settings(Path("output"))
@@ -164,11 +186,19 @@ class HardwareDetectionTests(unittest.TestCase):
         ), patch(
             "video_converter.converter._vaapi_encoder_works",
             return_value=True,
+        ), patch(
+            "video_converter.converter._vaapi_decode_profiles",
+            return_value={"h264"},
         ):
             status = hardware_status(settings)
 
         self.assertEqual({item["backend"] for item in status}, {"vaapi"})
         self.assertEqual({item["codec"] for item in status}, {"h264", "h265"})
+        h264 = next(item for item in status if item["codec"] == "h264")
+        h265 = next(item for item in status if item["codec"] == "h265")
+        self.assertTrue(h264["decode_ready"])
+        self.assertTrue(h264["encode_ready"])
+        self.assertFalse(h265["decode_ready"])
 
 
 class ConversionTests(unittest.TestCase):
@@ -210,6 +240,22 @@ class ConversionTests(unittest.TestCase):
         settings = make_settings(Path("output"))
 
         self.assertIsNone(_video_filter(settings, "vaapi"))
+
+    def test_vaapi_decode_filter_downloads_frames_for_cpu_encoder(self) -> None:
+        settings = make_settings(Path("output"))
+        self.assertEqual(
+            _video_filter(settings, "vaapi_decode"),
+            "hwdownload,format=nv12",
+        )
+
+    def test_vaapi_decode_filter_applies_cpu_resize_without_upload(self) -> None:
+        settings = make_settings(Path("output"), width=1280, height=720)
+        self.assertEqual(
+            _video_filter(settings, "vaapi_decode"),
+            "hwdownload,format=nv12,"
+            "scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        )
 
     def test_progress_uses_out_time_field_without_previous_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -337,6 +383,81 @@ class ConversionTests(unittest.TestCase):
             self.assertEqual(calls, ["h264_vaapi", "libx264"])
             self.assertEqual(destination.read_bytes(), b"software video")
             self.assertEqual(list(output.glob("*.partial.mp4")), [])
+
+    def test_uses_vaapi_decode_when_hardware_encoding_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "output"
+            output.mkdir()
+            source = root / "clip.mov"
+            source.touch()
+            settings = make_settings(output)
+
+            def encode(_settings, _source, destination, codec, backend="software", *_args, **_kwargs):
+                Path(destination).write_bytes(b"video")
+
+            with (
+                patch(
+                    "video_converter.converter._available_encoders",
+                    return_value={"libx264", "h264_vaapi"},
+                ),
+                patch(
+                    "video_converter.converter._hardware_candidates",
+                    return_value=[],
+                ),
+                patch(
+                    "video_converter.converter._hardware_device",
+                    return_value="/dev/dri/renderD128",
+                ),
+                patch(
+                    "video_converter.converter._run_ffmpeg",
+                    side_effect=encode,
+                ) as run_ffmpeg,
+            ):
+                destination = convert_file(settings, source)
+
+            self.assertEqual(destination.read_bytes(), b"video")
+            self.assertEqual(run_ffmpeg.call_args.args[3], "libx264")
+            self.assertEqual(run_ffmpeg.call_args.args[4], "vaapi_decode")
+
+    def test_falls_back_to_full_software_when_vaapi_decode_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "output"
+            output.mkdir()
+            source = root / "clip.mov"
+            source.touch()
+            settings = make_settings(output)
+            calls: list[str] = []
+
+            def encode(_settings, _source, destination, codec, backend="software", *_args, **_kwargs):
+                calls.append(backend)
+                if backend == "vaapi_decode":
+                    raise RuntimeError("unsupported input profile")
+                Path(destination).write_bytes(b"software video")
+
+            with (
+                patch(
+                    "video_converter.converter._available_encoders",
+                    return_value={"libx264", "h264_vaapi"},
+                ),
+                patch(
+                    "video_converter.converter._hardware_candidates",
+                    return_value=[],
+                ),
+                patch(
+                    "video_converter.converter._hardware_device",
+                    return_value="/dev/dri/renderD128",
+                ),
+                patch(
+                    "video_converter.converter._run_ffmpeg",
+                    side_effect=encode,
+                ),
+            ):
+                destination = convert_file(settings, source)
+
+            self.assertEqual(calls, ["vaapi_decode", "software"])
+            self.assertEqual(destination.read_bytes(), b"software video")
 
     def test_tries_vaapi_before_cpu_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

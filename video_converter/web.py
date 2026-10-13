@@ -45,7 +45,7 @@ async function refresh(){try{
  const data=await response.json();document.querySelector("#service").textContent=data.running?"服务运行中 · 自动每 2 秒刷新":"服务正在停止";
  for(const name of ["queued","running","completed","failed"])document.querySelector("#"+name).textContent=data.counts[name];
  document.querySelector("#codec").textContent="目标编码格式："+data.video_codec+"；同时转换上限："+data.max_concurrent_conversions;
- document.querySelector("#hardware").innerHTML=data.hardware.map(item=>`<div class="chip"><strong>${safe(item.backend.toUpperCase())} · ${safe(item.codec)}</strong><div class="${item.ready?"ready":"unready"}">${item.ready?"可用":"不可用"}</div><small>${safe(item.encoder)} · ${safe(item.reason)}</small></div>`).join("")||'<div class="muted">暂无检测结果</div>';
+ document.querySelector("#hardware").innerHTML=data.hardware.map(item=>`<div class="chip"><strong>${safe(item.backend.toUpperCase())} · ${safe(item.codec)}</strong><div class="${item.decode_ready?"ready":"unready"}">硬件解码：${item.decode_ready?"支持":"不支持"}</div><div class="${item.encode_ready?"ready":"unready"}">硬件编码：${item.encode_ready?"支持":"不支持"}</div><small>解码：${safe(item.decode_reason)}<br>编码：${safe(item.encode_reason)}</small></div>`).join("")||'<div class="muted">暂无检测结果</div>';
  const sorted={running:0,queued:1,failed:2,completed:3};data.jobs.sort((a,b)=>sorted[a.status]-sorted[b.status]);
  document.querySelector("#jobs").innerHTML=data.jobs.map(job=>{const pct=job.progress==null?null:Math.round(job.progress);
   return `<tr><td>${safe(job.file)}</td><td class="status ${job.status==="failed"?"failed":""}">${labels[job.status]||safe(job.status)}</td>

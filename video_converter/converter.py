@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -129,6 +130,23 @@ def _vaapi_encoder_works(ffmpeg_bin: str, device: str, encoder: str) -> bool:
     return True
 
 
+@lru_cache(maxsize=16)
+def _vaapi_decode_profiles(device: str) -> set[str]:
+    result = subprocess.run(
+        ["vainfo", "--display", "drm", "--device", device],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    profiles: set[str] = set()
+    for line in f"{result.stdout}\n{result.stderr}".splitlines():
+        match = re.search(r"VAProfile(H264|HEVC)\w*\s*:\s*(.*)", line)
+        if match and "VAEntrypointVLD" in match.group(2):
+            profiles.add({"H264": "h264", "HEVC": "h265"}[match.group(1)])
+    return profiles
+
+
 def _hardware_candidates(
     encoders: Iterable[str],
     codec: str,
@@ -155,6 +173,10 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
                 "codec": codec,
                 "encoder": encoder,
                 "ready": False,
+                "decode_ready": False,
+                "decode_reason": "无法读取 FFmpeg 编码器",
+                "encode_ready": False,
+                "encode_reason": "无法读取 FFmpeg 编码器",
                 "reason": "无法读取 FFmpeg 编码器",
             }
             for codec, (_, encoder) in CODEC_PROFILES.items()
@@ -169,40 +191,61 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
             device_ready
             and _vaapi_encoder_works(settings.ffmpeg_bin, device, encoder)
         )
-        ready = encoder_available and device is not None and encoder_ready
-        if ready:
-            reason = f"VAAPI 编码测试通过：{device}；输入解码格式按任务验证"
+        try:
+            decode_ready = bool(
+                device is not None and codec in _vaapi_decode_profiles(device)
+            )
+            decode_reason = (
+                f"vainfo 检测到 {codec.upper()} 硬件解码"
+                if decode_ready
+                else f"vainfo 未检测到 {codec.upper()} 硬件解码入口"
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            LOGGER.warning("Could not inspect VAAPI decode profiles: %s", exc)
+            decode_ready = False
+            decode_reason = "无法读取 VAAPI 解码能力（vainfo）"
+        encode_ready = bool(device_ready and encoder_ready)
+        if encode_ready:
+            encode_reason = f"VAAPI 编码测试通过：{device}"
         elif not encoder_available:
-            reason = "FFmpeg 未包含此 VAAPI 编码器"
-        elif not device_ready:
-            reason = "未检测到可初始化的 VAAPI render 设备"
+            encode_reason = "FFmpeg 未包含此 VAAPI 编码器"
+        elif device is None:
+            encode_reason = "未检测到可初始化的 VAAPI render 设备"
         else:
-            reason = "此 GPU/驱动不支持该 VAAPI 编码格式"
+            encode_reason = "此 GPU/驱动不支持该 VAAPI 编码格式"
         result.append(
             {
                 "backend": "vaapi",
                 "codec": codec,
                 "encoder": encoder,
-                "ready": ready,
-                "reason": reason,
+                "ready": encode_ready,
+                "decode_ready": decode_ready,
+                "decode_reason": decode_reason,
+                "encode_ready": encode_ready,
+                "encode_reason": encode_reason,
+                "reason": encode_reason,
             }
         )
     return result
 
 
 def _video_filter(settings: Settings, backend: str) -> str | None:
-    if settings.width is None or settings.height is None:
-        return None
-
-    scale_and_pad = (
-        f"scale={settings.width}:{settings.height}:"
-        "force_original_aspect_ratio=decrease,"
-        f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2"
-    )
+    scale_and_pad = None
+    if settings.width is not None and settings.height is not None:
+        scale_and_pad = (
+            f"scale={settings.width}:{settings.height}:"
+            "force_original_aspect_ratio=decrease,"
+            f"pad={settings.width}:{settings.height}:(ow-iw)/2:(oh-ih)/2"
+        )
     if backend == "software":
         return scale_and_pad
     if backend == "vaapi":
+        if scale_and_pad is None:
+            return None
         return f"hwdownload,format=nv12,{scale_and_pad},format=nv12,hwupload"
+    if backend == "vaapi_decode":
+        download = "hwdownload,format=nv12"
+        return f"{download},{scale_and_pad}" if scale_and_pad else download
     raise ValueError(f"Unsupported hardware backend: {backend}")
 
 
@@ -227,7 +270,7 @@ def _run_ffmpeg(
         "-loglevel",
         "error",
     ]
-    if backend == "vaapi":
+    if backend in {"vaapi", "vaapi_decode"}:
         if not device:
             raise RuntimeError("VAAPI requires an available render device")
         command.extend(
@@ -414,12 +457,47 @@ def convert_file(
 
             if not succeeded:
                 if hardware_candidates:
-                    LOGGER.warning("Hardware encoders failed for %s; falling back to CPU", source)
+                    LOGGER.warning(
+                        "Hardware encoders failed for %s; trying VAAPI decode with CPU encoding",
+                        source,
+                    )
                 if software_encoder not in encoders:
                     raise RuntimeError(
                         f"No supported hardware encoder worked and FFmpeg does not "
                         f"provide {software_encoder}"
                     )
+                device = _hardware_device(settings.ffmpeg_bin)
+                if device:
+                    try:
+                        LOGGER.info("Trying VAAPI decode with %s for %s", software_encoder, source)
+                        if on_progress:
+                            on_progress(
+                                {
+                                    "encoder": software_encoder,
+                                    "backend": "VAAPI 解码 + CPU 编码",
+                                    "progress": 0.0,
+                                    "out_time": None,
+                                }
+                            )
+                        _run_ffmpeg(
+                            settings,
+                            source,
+                            temporary_path,
+                            software_encoder,
+                            "vaapi_decode",
+                            device,
+                            on_progress,
+                            duration,
+                        )
+                        succeeded = True
+                    except RuntimeError as exc:
+                        LOGGER.warning(
+                            "VAAPI decoding failed for %s; falling back to CPU: %s",
+                            source,
+                            exc,
+                        )
+                        temporary_path.unlink(missing_ok=True)
+            if not succeeded:
                 if on_progress:
                     on_progress(
                         {
