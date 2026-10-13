@@ -1,7 +1,10 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ffmpeg \
+    && apt-get install --no-install-recommends -y ffmpeg mesa-va-drivers vainfo \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install --no-install-recommends -y intel-media-va-driver i965-va-driver; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

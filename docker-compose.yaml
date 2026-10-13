@@ -8,11 +8,7 @@ services:
       OUTPUT_DIR: /data/output
       # 输出容器格式：mp4、mkv、mov 等；扩展名会与此设置一致，需与所选编码兼容。
       OUTPUT_FORMAT: mp4
-      # 视频编码格式：
-      # - h264：优先尝试可用的 H.264 硬件编码器（NVIDIA NVENC、Intel QSV、VAAPI），失败时回退 CPU libx264。
-      # - h265：优先尝试可用的 H.265/HEVC 硬件编码器（NVENC、QSV、VAAPI），失败时回退 CPU libx265。
-      # 自动检测需要在下方按需启用 GPU/设备映射；不想自动选择时可填写具体 FFmpeg 编码器名称，
-      # 例如 h264_nvenc、hevc_nvenc、libx264 或 libx265（指定具体编码器后不再自动回退）。
+      # 视频编码格式：h264 或 h265。自动尝试 VAAPI，失败时回退 CPU。
       VIDEO_CODEC: h264
       # 音频编码器，例如 aac、libopus；copy 表示不重新编码音频流。
       AUDIO_CODEC: aac
@@ -30,17 +26,6 @@ services:
     volumes:
       - ./input:/data/input
       - ./output:/data/output
-    # NVIDIA: install NVIDIA Container Toolkit, then uncomment this line:
-    # gpus: all
-    # For older Compose versions, use this instead of "gpus: all":
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    # Intel QSV / VAAPI: uncomment these lines when /dev/dri is available.
-    # NVIDIA and Intel mappings may both be enabled; auto-selection uses NVIDIA first.
-    # devices:
-    #   - /dev/dri:/dev/dri
+    # Linux VAAPI (Intel/AMD)
+    devices:
+      - /dev/dri:/dev/dri

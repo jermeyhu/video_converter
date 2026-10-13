@@ -27,8 +27,8 @@ VIDEO_EXTENSIONS = {
     ".wmv",
 }
 CODEC_PROFILES = {
-    "h264": ("libx264", (("h264_nvenc", "nvidia"), ("h264_qsv", "qsv"), ("h264_vaapi", "vaapi"))),
-    "h265": ("libx265", (("hevc_nvenc", "nvidia"), ("hevc_qsv", "qsv"), ("hevc_vaapi", "vaapi"))),
+    "h264": ("libx264", "h264_vaapi"),
+    "h265": ("libx265", "hevc_vaapi"),
 }
 CODEC_ALIASES = {"auto": "h264", "hevc": "h265"}
 
@@ -83,39 +83,50 @@ def _ffmpeg_can_initialize_device(ffmpeg_bin: str, device_spec: str) -> bool:
 
 
 @lru_cache(maxsize=16)
-def _hardware_device(backend: str, ffmpeg_bin: str = "ffmpeg") -> str | None:
-    if backend == "nvidia":
-        if not Path("/dev/nvidia0").exists():
-            try:
-                result = subprocess.run(
-                    ["nvidia-smi", "-L"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                return None
-            if not result.stdout.strip():
-                return None
-        return "nvidia" if _ffmpeg_can_initialize_device(ffmpeg_bin, "cuda=hw:0") else None
-
-    if backend == "qsv":
-        devices = sorted(Path("/dev/dri").glob("renderD*"))
-        for device in devices:
-            device_spec = f"qsv=hw,child_device={device}"
-            if _ffmpeg_can_initialize_device(ffmpeg_bin, device_spec):
-                return str(device)
-        if devices or os.name != "nt":
-            return None
-        return "" if _ffmpeg_can_initialize_device(ffmpeg_bin, "qsv=hw") else None
-
-    if backend == "vaapi":
-        devices = sorted(Path("/dev/dri").glob("renderD*"))
-        for device in devices:
-            if _ffmpeg_can_initialize_device(ffmpeg_bin, f"vaapi=hw:{device}"):
-                return str(device)
+def _hardware_device(ffmpeg_bin: str = "ffmpeg") -> str | None:
+    devices = sorted(Path("/dev/dri").glob("renderD*"))
+    for device in devices:
+        if _ffmpeg_can_initialize_device(ffmpeg_bin, f"vaapi=hw:{device}"):
+            return str(device)
     return None
+
+
+@lru_cache(maxsize=32)
+def _vaapi_encoder_works(ffmpeg_bin: str, device: str, encoder: str) -> bool:
+    command = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-init_hw_device",
+        f"vaapi=hw:{device}",
+        "-filter_hw_device",
+        "hw",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=128x128:rate=1",
+        "-frames:v",
+        "1",
+        "-vf",
+        "format=nv12,hwupload",
+        "-c:v",
+        encoder,
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def _hardware_candidates(
@@ -124,20 +135,13 @@ def _hardware_candidates(
     ffmpeg_bin: str = "ffmpeg",
 ) -> list[tuple[str, str, str | None]]:
     available = set(encoders)
-    candidates = []
-    for encoder, backend in CODEC_PROFILES[codec][1]:
-        if encoder not in available:
-            continue
-        device = _hardware_device(backend, ffmpeg_bin)
-        if backend == "nvidia":
-            if device is not None:
-                candidates.append((encoder, backend, None))
-        elif backend == "qsv":
-            if device is not None:
-                candidates.append((encoder, backend, device))
-        elif device:
-            candidates.append((encoder, backend, device))
-    return candidates
+    encoder = CODEC_PROFILES[codec][1]
+    if encoder not in available:
+        return []
+    device = _hardware_device(ffmpeg_bin)
+    if device and _vaapi_encoder_works(ffmpeg_bin, device, encoder):
+        return [(encoder, "vaapi", device)]
+    return []
 
 
 def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
@@ -147,54 +151,42 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
         LOGGER.warning("Could not inspect FFmpeg hardware encoders: %s", exc)
         return [
             {
-                "backend": backend,
+                "backend": "vaapi",
                 "codec": codec,
                 "encoder": encoder,
                 "ready": False,
                 "reason": "无法读取 FFmpeg 编码器",
             }
-            for codec in CODEC_PROFILES
-            for encoder, backend in CODEC_PROFILES[codec][1]
+            for codec, (_, encoder) in CODEC_PROFILES.items()
         ]
 
+    device = _hardware_device(settings.ffmpeg_bin)
     result = []
-    backends = {
-        backend
-        for codec_profiles in CODEC_PROFILES.values()
-        for encoder, backend in codec_profiles[1]
-        if encoder in encoders
-    }
-    devices = {
-        backend: _hardware_device(backend, settings.ffmpeg_bin)
-        for backend in backends
-    }
-    for codec, (_, profiles) in CODEC_PROFILES.items():
-        for encoder, backend in profiles:
-            encoder_available = encoder in encoders
-            device = devices.get(backend) if encoder_available else None
-            ready = encoder_available and (
-                device is not None
-            )
-            if ready:
-                if device and backend != "nvidia":
-                    reason = f"设备：{device}"
-                elif backend == "qsv" and os.name == "nt":
-                    reason = "FFmpeg 已成功初始化 Quick Sync 设备"
-                else:
-                    reason = "编码器和设备已检测到；具体输入解码支持按任务验证"
-            elif not encoder_available:
-                reason = "FFmpeg 未包含此编码器"
-            else:
-                reason = "未检测到可用 GPU 设备"
-            result.append(
-                {
-                    "backend": backend,
-                    "codec": codec,
-                    "encoder": encoder,
-                    "ready": ready,
-                    "reason": reason,
-                }
-            )
+    for codec, (_, encoder) in CODEC_PROFILES.items():
+        encoder_available = encoder in encoders
+        device_ready = encoder_available and device is not None
+        encoder_ready = bool(
+            device_ready
+            and _vaapi_encoder_works(settings.ffmpeg_bin, device, encoder)
+        )
+        ready = encoder_available and device is not None and encoder_ready
+        if ready:
+            reason = f"VAAPI 编码测试通过：{device}；输入解码格式按任务验证"
+        elif not encoder_available:
+            reason = "FFmpeg 未包含此 VAAPI 编码器"
+        elif not device_ready:
+            reason = "未检测到可初始化的 VAAPI render 设备"
+        else:
+            reason = "此 GPU/驱动不支持该 VAAPI 编码格式"
+        result.append(
+            {
+                "backend": "vaapi",
+                "codec": codec,
+                "encoder": encoder,
+                "ready": ready,
+                "reason": reason,
+            }
+        )
     return result
 
 
@@ -209,7 +201,7 @@ def _video_filter(settings: Settings, backend: str) -> str | None:
     )
     if backend == "software":
         return scale_and_pad
-    if backend in {"nvidia", "qsv", "vaapi"}:
+    if backend == "vaapi":
         return f"hwdownload,format=nv12,{scale_and_pad},format=nv12,hwupload"
     raise ValueError(f"Unsupported hardware backend: {backend}")
 
@@ -235,21 +227,7 @@ def _run_ffmpeg(
         "-loglevel",
         "error",
     ]
-    # Initialize one device context for hardware decode, filtering, and encode.
-    if backend == "nvidia":
-        command.extend(["-init_hw_device", "cuda=hw:0", "-filter_hw_device", "hw"])
-        command.extend(
-            ["-hwaccel", "cuda", "-hwaccel_device", "hw", "-hwaccel_output_format", "cuda"]
-        )
-    elif backend == "qsv":
-        qsv_device = f",child_device={device}" if device else ""
-        command.extend(
-            ["-init_hw_device", f"qsv=hw{qsv_device}", "-filter_hw_device", "hw"]
-        )
-        command.extend(
-            ["-hwaccel", "qsv", "-hwaccel_device", "hw", "-hwaccel_output_format", "qsv"]
-        )
-    elif backend == "vaapi":
+    if backend == "vaapi":
         if not device:
             raise RuntimeError("VAAPI requires an available render device")
         command.extend(
@@ -377,25 +355,12 @@ def convert_file(
         requested_codec = CODEC_ALIASES.get(settings.video_codec, settings.video_codec)
         duration = _media_duration(settings, source)
         if requested_codec not in CODEC_PROFILES:
-            backend = next(
-                (
-                    name
-                    for suffix, name in (
-                        ("_nvenc", "nvidia"),
-                        ("_qsv", "qsv"),
-                        ("_vaapi", "vaapi"),
-                    )
-                    if settings.video_codec.endswith(suffix)
-                ),
-                "software",
-            )
+            backend = "vaapi" if settings.video_codec.endswith("_vaapi") else "software"
             device = (
-                _hardware_device(backend, settings.ffmpeg_bin)
-                if backend != "software"
+                _hardware_device(settings.ffmpeg_bin)
+                if backend == "vaapi"
                 else None
             )
-            if backend == "nvidia":
-                device = None
             if on_progress:
                 detected_backend = backend
                 if detected_backend == "software":
