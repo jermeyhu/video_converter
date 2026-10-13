@@ -17,6 +17,8 @@ class Settings:
     poll_interval_seconds: float
     file_stability_seconds: float
     ffmpeg_bin: str
+    ffprobe_bin: str = "ffprobe"
+    web_port: int = 5800
 
 
 def _positive_int(name: str, default: str) -> int:
@@ -88,4 +90,6 @@ def load_settings() -> Settings:
         poll_interval_seconds=_positive_float("POLL_INTERVAL_SECONDS", "2"),
         file_stability_seconds=_positive_float("FILE_STABILITY_SECONDS", "5"),
         ffmpeg_bin=os.environ.get("FFMPEG_BIN", "ffmpeg"),
+        ffprobe_bin=os.environ.get("FFPROBE_BIN", "ffprobe"),
+        web_port=_positive_int("WEB_PORT", "5800"),
     )

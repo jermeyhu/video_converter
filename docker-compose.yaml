@@ -24,6 +24,9 @@ services:
       # 目录扫描间隔（秒）和文件保持不变多久后才开始转换（秒）。
       POLL_INTERVAL_SECONDS: "2"
       FILE_STABILITY_SECONDS: "5"
+      WEB_PORT: "5800"
+    ports:
+      - "5800:5800"
     volumes:
       - ./input:/data/input
       - ./output:/data/output
@@ -37,6 +40,7 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
-    # Intel QSV / VAAPI: uncomment these lines instead of NVIDIA settings:
+    # Intel QSV / VAAPI: uncomment these lines when /dev/dri is available.
+    # NVIDIA and Intel mappings may both be enabled; auto-selection uses NVIDIA first.
     # devices:
     #   - /dev/dri:/dev/dri

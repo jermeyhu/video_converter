@@ -39,7 +39,7 @@ class WatcherQueueTests(unittest.TestCase):
             maximum_active = 0
             completed = 0
 
-            def convert(_settings: Settings, source: Path) -> Path:
+            def convert(_settings: Settings, source: Path, **_kwargs: object) -> Path:
                 nonlocal active, maximum_active, completed
                 with lock:
                     active += 1
