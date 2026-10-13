@@ -79,14 +79,16 @@ docker compose -f docker-compose.yaml logs -f
 
 启用 VAAPI 时，FFmpeg 使用同一 `/dev/dri/renderD*` 设备进行硬件解码和硬件编码：
 
-- **Intel 核显：** amd64 镜像启用 Debian non-free 源并安装 `intel-media-va-driver-non-free`（Intel Gen8+，含硬件编码功能）及 i965 驱动；较新的 Intel 核显优先使用 iHD。实际支持的解码/编码格式仍取决于 GPU 世代和驱动。
-- **AMD 核显/显卡：** 镜像包含 Mesa VAAPI 驱动（`radeonsi`）；实际支持取决于 GPU、宿主机内核驱动和固件。
+- **Intel 核显：** 镜像使用 Jellyfin 官方 `jellyfin-ffmpeg8` Debian 包，其中包含 VAAPI 所需的 Intel 用户态媒体驱动；iHD 用于 Broadwell（Gen8）及更新平台，i965 用于更早的平台。Linux VAAPI 兼容 Intel 的 GPU 范围较广，解码/编码格式仍取决于 GPU 世代和驱动。
+- **AMD 核显/显卡：** 同一 Jellyfin FFmpeg 包包含 Mesa VAAPI 用户态驱动（`radeonsi`）；宿主机仍需提供 AMDGPU 内核驱动、固件并映射 `/dev/dri`。Jellyfin 文档指出 GCN 起支持 VAAPI，而 Polaris（RX 400/500）及更新 GPU 才有完整加速；具体编码格式因型号而异，RX 6400/6500 系列没有视频编码器。
 
 未设置输出尺寸时，硬件帧直接从硬件解码器传到对应硬件编码器。设置 `OUTPUT_WIDTH` / `OUTPUT_HEIGHT` 时，当前实现先将硬件解码帧下载到系统内存，再用 FFmpeg 的通用 `scale` / `pad` 滤镜保持比例并补边，最后上传到同一硬件设备编码。此时解码和编码仍由硬件完成，但缩放/补边由 CPU 执行；该路径避免依赖各后端并不一致的 padding 滤镜。
 
-状态页分别显示 H.264 / HEVC 的 VAAPI 硬件解码与硬件编码能力。解码能力来自 `vainfo` profile/entrypoint，编码能力会通过小型测试视频实际尝试；不保证任意输入编码格式、位深都可硬件解码。每个任务会按实际输入尝试硬解；解码失败会回退 CPU。
+状态页分别显示 H.264 / HEVC 的 VAAPI 硬件解码与硬件编码能力。解码能力来自 `vainfo` profile/entrypoint（`VAEntrypointVLD` 表示解码，`VAEntrypointEncSlice` 表示编码）；编码能力会以 640x360 测试帧和实际码率依次尝试可用 profile，而不是仅依据 FFmpeg 编码器列表判断。未设置 `LIBVA_DRIVER_NAME` 时由 libva 自动选择驱动；只有自动选择错误时才手动指定。不同 GPU 世代支持的 profile、位深和格式不同，不保证任意输入都可硬解；每个任务仍会按实际输入尝试硬解，失败时回退 CPU。
 
-Compose 直接拉取 GitHub Actions 发布到 GHCR 的 `ghcr.io/jermeyhu/video_converter:latest` 多架构镜像，不在 NAS 上本地构建。配置默认映射 Linux 主机的 `/dev/dri`，因此仅适用于有 VAAPI 设备节点的 Linux 主机；启动前确认宿主机存在 `/dev/dri/renderD*`。容器镜像内含 AMD Mesa 与 Intel VAAPI 用户态驱动；Intel amd64 使用提供完整编码功能的 non-free Media Driver。主机仍需提供匹配的内核驱动和固件。
+本项目只实现 Linux VAAPI，不启用 Intel QSV 或 AMD AMF。Jellyfin 文档指出 VAAPI 兼容 Intel 的 GPU 范围广，AMD Linux 推荐 VAAPI；请参考 [Jellyfin Intel 硬件加速文档](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/intel/) 和 [AMD 文档](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/amd/)。
+
+Compose 直接拉取 GitHub Actions 发布到 GHCR 的 `ghcr.io/jermeyhu/video_converter:latest` 多架构镜像，不在 NAS 上本地构建。容器使用 Jellyfin 官方 `jellyfin-ffmpeg8`、`ffprobe` 和 `vainfo`，并将 `/usr/lib/jellyfin-ffmpeg` 配置为默认工具路径；这样编码探测、转码和解码能力检测使用同一套用户态驱动。配置默认映射 Linux 主机的 `/dev/dri`，因此仅适用于有 VAAPI 设备节点的 Linux 主机；启动前确认宿主机存在 `/dev/dri/renderD*`。主机仍需提供匹配的内核驱动、固件及容器设备访问权限。
 
 可通过 `docker compose exec video-converter vainfo --display drm --device /dev/dri/renderD128` 验证驱动是否能访问设备。VAAPI 可用的编码 profile 随 GPU 型号而异，例如部分旧 Intel/AMD 核显不支持 HEVC 编码；此时 H.265 转换会由 CPU 完成。
 

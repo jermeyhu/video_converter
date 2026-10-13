@@ -32,6 +32,10 @@ CODEC_PROFILES = {
     "h265": ("libx265", "hevc_vaapi"),
 }
 CODEC_ALIASES = {"auto": "h264", "hevc": "h265"}
+VAAPI_ENCODER_PROFILES = {
+    "h264_vaapi": ("main", "high", "constrained_baseline"),
+    "hevc_vaapi": ("main",),
+}
 
 
 def _available_encoders(ffmpeg_bin: str) -> set[str]:
@@ -93,44 +97,53 @@ def _hardware_device(ffmpeg_bin: str = "ffmpeg") -> str | None:
 
 
 @lru_cache(maxsize=32)
-def _vaapi_encoder_works(ffmpeg_bin: str, device: str, encoder: str) -> bool:
-    profile = "main"
-    command = [
-        ffmpeg_bin,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-init_hw_device",
-        f"vaapi=hw:{device}",
-        "-filter_hw_device",
-        "hw",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=size=128x128:rate=1",
-        "-frames:v",
-        "1",
-        "-vf",
-        "format=nv12,hwupload",
-        "-c:v",
-        encoder,
-        "-profile:v",
-        profile,
-        "-f",
-        "null",
-        "-",
-    ]
-    try:
-        subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
-    return True
+def _vaapi_encoder_profile(
+    ffmpeg_bin: str,
+    device: str,
+    encoder: str,
+) -> str | None:
+    for profile in VAAPI_ENCODER_PROFILES[encoder]:
+        command = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-init_hw_device",
+            f"vaapi=hw:{device}",
+            "-filter_hw_device",
+            "hw",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=1",
+            "-frames:v",
+            "1",
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            encoder,
+            "-profile:v",
+            profile,
+            "-b:v",
+            "1M",
+            "-f",
+            "null",
+            "-",
+        ]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.CalledProcessError:
+            continue
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return profile
+    return None
 
 
 @lru_cache(maxsize=16)
@@ -154,14 +167,15 @@ def _hardware_candidates(
     encoders: Iterable[str],
     codec: str,
     ffmpeg_bin: str = "ffmpeg",
-) -> list[tuple[str, str, str | None]]:
+) -> list[tuple[str, str, str | None, str]]:
     available = set(encoders)
     encoder = CODEC_PROFILES[codec][1]
     if encoder not in available:
         return []
     device = _hardware_device(ffmpeg_bin)
-    if device and _vaapi_encoder_works(ffmpeg_bin, device, encoder):
-        return [(encoder, "vaapi", device)]
+    profile = _vaapi_encoder_profile(ffmpeg_bin, device, encoder) if device else None
+    if device and profile:
+        return [(encoder, "vaapi", device, profile)]
     return []
 
 
@@ -190,9 +204,10 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
     for codec, (_, encoder) in CODEC_PROFILES.items():
         encoder_available = encoder in encoders
         device_ready = encoder_available and device is not None
-        encoder_ready = bool(
-            device_ready
-            and _vaapi_encoder_works(settings.ffmpeg_bin, device, encoder)
+        profile = (
+            _vaapi_encoder_profile(settings.ffmpeg_bin, device, encoder)
+            if device_ready and device
+            else None
         )
         try:
             decode_ready = bool(
@@ -207,9 +222,9 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
             LOGGER.warning("Could not inspect VAAPI decode profiles: %s", exc)
             decode_ready = False
             decode_reason = "无法读取 VAAPI 解码能力（vainfo）"
-        encode_ready = bool(device_ready and encoder_ready)
+        encode_ready = bool(device_ready and profile)
         if encode_ready:
-            encode_reason = f"VAAPI 编码测试通过：{device}"
+            encode_reason = f"VAAPI {profile} 编码测试通过：{device}"
         elif not encoder_available:
             encode_reason = "FFmpeg 未包含此 VAAPI 编码器"
         elif device is None:
@@ -225,6 +240,7 @@ def hardware_status(settings: Settings) -> list[dict[str, str | bool]]:
                 "decode_ready": decode_ready,
                 "decode_reason": decode_reason,
                 "encode_ready": encode_ready,
+                "encode_profile": profile or "",
                 "encode_reason": encode_reason,
                 "reason": encode_reason,
             }
@@ -261,6 +277,7 @@ def _run_ffmpeg(
     device: str | None = None,
     on_progress: Callable[[dict[str, object]], None] | None = None,
     duration: float | None = None,
+    vaapi_profile: str = "main",
 ) -> None:
     command = [
         settings.ffmpeg_bin,
@@ -305,7 +322,7 @@ def _run_ffmpeg(
         ]
     )
     if backend == "vaapi":
-        command.extend(["-profile:v", "main"])
+        command.extend(["-profile:v", vaapi_profile])
     if settings.output_format == "mp4":
         command.extend(["-movflags", "+faststart"])
     command.extend(["-f", settings.output_format, str(destination)])
@@ -427,7 +444,7 @@ def convert_file(
                 encoders, requested_codec, settings.ffmpeg_bin
             )
             succeeded = False
-            for encoder, backend, device in hardware_candidates:
+            for encoder, backend, device, profile in hardware_candidates:
                 try:
                     LOGGER.info("Trying hardware encoder %s for %s", encoder, source)
                     if on_progress:
@@ -448,6 +465,7 @@ def convert_file(
                         device,
                         on_progress,
                         duration,
+                        vaapi_profile=profile,
                     )
                     succeeded = True
                     break

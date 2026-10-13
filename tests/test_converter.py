@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +10,8 @@ from video_converter.converter import (
     _available_encoders,
     _hardware_candidates,
     _hardware_device,
+    _vaapi_encoder_profile,
     _vaapi_decode_profiles,
-    _vaapi_encoder_works,
     _video_filter,
     _run_ffmpeg,
     convert_file,
@@ -59,23 +60,48 @@ class HardwareDetectionTests(unittest.TestCase):
         self.assertEqual(encoders, {"libx264", "h264_vaapi", "aac"})
 
     def test_vaapi_encoder_probe_runs_a_real_encode(self) -> None:
+        _vaapi_encoder_profile.cache_clear()
         with patch(
             "video_converter.converter.subprocess.run",
             return_value=SimpleNamespace(returncode=0),
         ) as run:
-            works = _vaapi_encoder_works(
+            profile = _vaapi_encoder_profile(
                 "ffmpeg",
                 "/dev/dri/renderD128",
                 "h264_vaapi",
             )
 
-        self.assertTrue(works)
+        self.assertEqual(profile, "main")
         command = run.call_args.args[0]
         self.assertIn("vaapi=hw:/dev/dri/renderD128", command)
         self.assertIn("h264_vaapi", command)
         self.assertIn("-profile:v", command)
         self.assertIn("main", command)
-        self.assertIn("testsrc2=size=128x128:rate=1", command)
+        self.assertIn("testsrc2=size=640x360:rate=1", command)
+        self.assertIn("-b:v", command)
+        _vaapi_encoder_profile.cache_clear()
+
+    def test_vaapi_encoder_probe_tries_supported_h264_profiles(self) -> None:
+        _vaapi_encoder_profile.cache_clear()
+        with patch(
+            "video_converter.converter.subprocess.run",
+            side_effect=[
+                subprocess.CalledProcessError(1, "ffmpeg"),
+                SimpleNamespace(returncode=0),
+            ],
+        ) as run:
+            profile = _vaapi_encoder_profile(
+                "ffmpeg",
+                "/dev/dri/renderD128",
+                "h264_vaapi",
+            )
+
+        self.assertEqual(profile, "high")
+        first_command = run.call_args_list[0].args[0]
+        second_command = run.call_args_list[1].args[0]
+        self.assertEqual(first_command[first_command.index("-profile:v") + 1], "main")
+        self.assertEqual(second_command[second_command.index("-profile:v") + 1], "high")
+        _vaapi_encoder_profile.cache_clear()
 
     def test_vaapi_decode_profiles_include_only_vld_entries(self) -> None:
         _vaapi_decode_profiles.cache_clear()
@@ -101,12 +127,15 @@ class HardwareDetectionTests(unittest.TestCase):
             "video_converter.converter._hardware_device",
             return_value="/dev/dri/renderD128",
         ) as device, patch(
-            "video_converter.converter._vaapi_encoder_works",
-            return_value=True,
+            "video_converter.converter._vaapi_encoder_profile",
+            return_value="main",
         ):
             candidates = _hardware_candidates({"h264_vaapi"}, "h264", "ffmpeg")
 
-        self.assertEqual(candidates, [("h264_vaapi", "vaapi", "/dev/dri/renderD128")])
+        self.assertEqual(
+            candidates,
+            [("h264_vaapi", "vaapi", "/dev/dri/renderD128", "main")],
+        )
         device.assert_called_once_with("ffmpeg")
 
     def test_h265_candidates_use_hevc_encoders(self) -> None:
@@ -114,8 +143,8 @@ class HardwareDetectionTests(unittest.TestCase):
             "video_converter.converter._hardware_device",
             return_value="/dev/dri/renderD128",
         ), patch(
-            "video_converter.converter._vaapi_encoder_works",
-            return_value=True,
+            "video_converter.converter._vaapi_encoder_profile",
+            return_value="main",
         ):
             candidates = _hardware_candidates(
                 {"hevc_vaapi", "h264_vaapi"},
@@ -125,7 +154,7 @@ class HardwareDetectionTests(unittest.TestCase):
 
         self.assertEqual(
             candidates,
-            [("hevc_vaapi", "vaapi", "/dev/dri/renderD128")],
+            [("hevc_vaapi", "vaapi", "/dev/dri/renderD128", "main")],
         )
 
     def test_hardware_candidate_requires_encoder_profile_support(self) -> None:
@@ -133,8 +162,8 @@ class HardwareDetectionTests(unittest.TestCase):
             "video_converter.converter._hardware_device",
             return_value="/dev/dri/renderD128",
         ), patch(
-            "video_converter.converter._vaapi_encoder_works",
-            return_value=False,
+            "video_converter.converter._vaapi_encoder_profile",
+            return_value=None,
         ):
             candidates = _hardware_candidates(
                 {"h264_vaapi"},
@@ -186,8 +215,8 @@ class HardwareDetectionTests(unittest.TestCase):
             "video_converter.converter._hardware_device",
             return_value="/dev/dri/renderD128",
         ), patch(
-            "video_converter.converter._vaapi_encoder_works",
-            return_value=True,
+            "video_converter.converter._vaapi_encoder_profile",
+            return_value="main",
         ), patch(
             "video_converter.converter._vaapi_decode_profiles",
             return_value={"h264"},
@@ -348,7 +377,7 @@ class ConversionTests(unittest.TestCase):
                 patch("video_converter.converter._available_encoders", return_value={"h264_vaapi", "libx264"}),
                 patch(
                     "video_converter.converter._hardware_candidates",
-                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128")],
+                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128", "high")],
                 ),
                 patch("video_converter.converter._run_ffmpeg", side_effect=encode) as run_ffmpeg,
             ):
@@ -356,6 +385,7 @@ class ConversionTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"video")
             self.assertEqual(run_ffmpeg.call_args.args[3], "h264_vaapi")
+            self.assertEqual(run_ffmpeg.call_args.kwargs["vaapi_profile"], "high")
 
     def test_falls_back_to_cpu_when_hardware_encoding_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -378,7 +408,7 @@ class ConversionTests(unittest.TestCase):
                 patch("video_converter.converter._available_encoders", return_value={"h264_vaapi", "libx264"}),
                 patch(
                     "video_converter.converter._hardware_candidates",
-                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128")],
+                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128", "main")],
                 ),
                 patch("video_converter.converter._run_ffmpeg", side_effect=encode),
             ):
@@ -486,7 +516,7 @@ class ConversionTests(unittest.TestCase):
                 ),
                 patch(
                     "video_converter.converter._hardware_candidates",
-                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128")],
+                    return_value=[("h264_vaapi", "vaapi", "/dev/dri/renderD128", "main")],
                 ),
                 patch("video_converter.converter._run_ffmpeg", side_effect=encode),
             ):
@@ -533,7 +563,7 @@ class ConversionTests(unittest.TestCase):
                 ),
                 patch(
                     "video_converter.converter._hardware_candidates",
-                    return_value=[("hevc_vaapi", "vaapi", "/dev/dri/renderD128")],
+                    return_value=[("hevc_vaapi", "vaapi", "/dev/dri/renderD128", "main")],
                 ),
                 patch("video_converter.converter._run_ffmpeg", side_effect=encode),
             ):

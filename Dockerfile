@@ -1,20 +1,25 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
-RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-        sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
-            /etc/apt/sources.list.d/debian.sources; \
-    fi \
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates curl gnupg libdrm2 \
+    && install -d /etc/apt/keyrings \
+    && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
+    && printf 'Types: deb\nURIs: https://repo.jellyfin.org/master/debian\nSuites: bookworm\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/jellyfin.gpg\n' \
+        "$(dpkg --print-architecture)" \
+        > /etc/apt/sources.list.d/jellyfin.sources \
     && apt-get update \
-    && apt-get install --no-install-recommends -y ffmpeg mesa-va-drivers vainfo \
-    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-        apt-get install --no-install-recommends -y intel-media-va-driver-non-free i965-va-driver; \
-    fi \
+    && apt-get install --no-install-recommends -y jellyfin-ffmpeg8 \
+    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY video_converter /app/video_converter
 
-ENV PYTHONUNBUFFERED=1 \
+ENV PATH="/usr/lib/jellyfin-ffmpeg:${PATH}" \
+    FFMPEG_BIN=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    FFPROBE_BIN=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PYTHONUNBUFFERED=1 \
     INPUT_DIR=/data/input \
     OUTPUT_DIR=/data/output \
     OUTPUT_FORMAT=mp4 \
